@@ -45,6 +45,7 @@ const savedRange = Effect.runSync(Ref.make<Range | null>(null))
 const savedActiveElement = Effect.runSync(
   Ref.make<{ el: HTMLInputElement | HTMLTextAreaElement; start: number; end: number } | null>(null),
 )
+const savedIframe = Effect.runSync(Ref.make<HTMLIFrameElement | null>(null))
 const toastEl = Effect.runSync(Ref.make<HTMLElement | null>(null))
 
 console.log('[content] Content script loaded')
@@ -58,6 +59,25 @@ const isInputLike = (el: Element | null): el is HTMLInputElement | HTMLTextAreaE
 const saveCurrentSelection = (source: string) => {
   const active = document.activeElement
   console.log(`[content] saveCurrentSelection (${source}) — activeElement: ${active?.tagName} ${active?.constructor.name}`)
+
+  if (active instanceof HTMLIFrameElement) {
+    try {
+      const iframeWin = active.contentWindow
+      const selection = iframeWin?.getSelection()
+      const text = selection?.toString() ?? ''
+      console.log(`[content] (${source}) iframe selection rangeCount=${selection?.rangeCount} text="${text.slice(0, 50)}"`)
+      if (text.trim() && selection && selection.rangeCount > 0) {
+        Effect.runSync(Ref.set(savedIframe, active))
+        Effect.runSync(Ref.set(savedRange, selection.getRangeAt(0).cloneRange()))
+        Effect.runSync(Ref.set(savedActiveElement, null))
+        console.log(`[content] (${source}) saved iframe range`)
+      }
+    } catch (e) {
+      console.warn(`[content] (${source}) cross-origin iframe, cannot access selection`, e)
+    }
+    return
+  }
+
   if (isInputLike(active)) {
     const el = active as HTMLInputElement
     const start = el.selectionStart ?? 0
@@ -66,14 +86,16 @@ const saveCurrentSelection = (source: string) => {
       console.log(`[content] (${source}) saved input/textarea [${start}, ${end}]`)
       Effect.runSync(Ref.set(savedActiveElement, { el, start, end }))
       Effect.runSync(Ref.set(savedRange, null))
+      Effect.runSync(Ref.set(savedIframe, null))
     }
   } else {
     const selection = window.getSelection()
     const text = selection?.toString() ?? ''
     console.log(`[content] (${source}) getSelection rangeCount=${selection?.rangeCount} text="${text.slice(0, 50)}"`)
-    if (text.trim() && selection!.rangeCount > 0) {
-      Effect.runSync(Ref.set(savedRange, selection!.getRangeAt(0).cloneRange()))
+    if (text.trim() && selection && selection.rangeCount > 0) {
+      Effect.runSync(Ref.set(savedRange, selection.getRangeAt(0).cloneRange()))
       Effect.runSync(Ref.set(savedActiveElement, null))
+      Effect.runSync(Ref.set(savedIframe, null))
       console.log(`[content] (${source}) saved range`)
     }
   }
@@ -97,7 +119,6 @@ const validateText = (text: string): Effect.Effect<string, SelectionError> =>
 const restoreAndReplace = (text: string): Effect.Effect<void> =>
   Effect.gen(function* () {
     const saved = yield* Ref.get(savedActiveElement)
-
     if (saved) {
       console.log(`[content] Replacing via input/textarea setRangeText [${saved.start}, ${saved.end}]`)
       saved.el.focus()
@@ -107,8 +128,34 @@ const restoreAndReplace = (text: string): Effect.Effect<void> =>
       return
     }
 
+    const iframe = yield* Ref.get(savedIframe)
     const range = yield* Ref.get(savedRange)
-    console.log(`[content] Replacing via execCommand — range: ${range ? 'present' : 'null'}`)
+    console.log(`[content] iframe: ${iframe ? iframe.id : 'null'}, range: ${range ? 'present' : 'null'}`)
+
+    if (iframe && range) {
+      console.log('[content] Replacing via iframe execCommand')
+      yield* Effect.sync(() => {
+        try {
+          const iframeWin = iframe.contentWindow
+          const iframeDoc = iframe.contentDocument
+          if (iframeWin && iframeDoc) {
+            const selection = iframeWin.getSelection()
+            if (selection) {
+              selection.removeAllRanges()
+              selection.addRange(range)
+              iframeDoc.execCommand('insertText', false, text)
+              console.log('[content] Replacement done (iframe execCommand)')
+            } else {
+              console.warn('[content] iframe getSelection() returned null')
+            }
+          }
+        } catch (e) {
+          console.warn('[content] iframe replacement failed', e)
+        }
+      })
+      return
+    }
+
     if (!range) {
       console.warn('[content] No saved range, cannot replace text')
       return
@@ -212,6 +259,7 @@ chrome.runtime.onMessage.addListener(message => {
     yield* restoreAndReplace(corrected)
     yield* Ref.set(savedRange, null)
     yield* Ref.set(savedActiveElement, null)
+    yield* Ref.set(savedIframe, null)
     yield* showToast('Text corrected!', 'success')
   }).pipe(
     Effect.catchTags({
