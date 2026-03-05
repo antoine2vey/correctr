@@ -49,24 +49,25 @@ const toastEl = Effect.runSync(Ref.make<HTMLElement | null>(null))
 
 console.log('[content] Content script loaded')
 
-// Save selection state before the browser clears it on context menu open
-document.addEventListener('contextmenu', () => {
+// Continuously track the latest selection so it's always available when the trigger arrives
+document.addEventListener('selectionchange', () => {
   const active = document.activeElement
-  console.log('[content] contextmenu event — activeElement:', active?.tagName, active?.constructor.name)
   if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
     const start = active.selectionStart ?? 0
     const end = active.selectionEnd ?? 0
-    console.log(`[content] Saving input/textarea selection: [${start}, ${end}]`)
-    Effect.runSync(Ref.set(savedActiveElement, { el: active, start, end }))
-    Effect.runSync(Ref.set(savedRange, null))
+    if (start !== end) {
+      console.log(`[content] selectionchange — input/textarea [${start}, ${end}]`)
+      Effect.runSync(Ref.set(savedActiveElement, { el: active, start, end }))
+      Effect.runSync(Ref.set(savedRange, null))
+    }
   } else {
     const selection = window.getSelection()
-    const hasRange = !!(selection && selection.rangeCount > 0)
-    console.log(`[content] Saving range selection — hasRange: ${hasRange}, text: "${selection?.toString().slice(0, 50)}"`)
-    if (hasRange) {
+    const text = selection?.toString() ?? ''
+    if (text.trim()) {
+      console.log(`[content] selectionchange — range "${text.slice(0, 50)}"`)
       Effect.runSync(Ref.set(savedRange, selection!.getRangeAt(0).cloneRange()))
+      Effect.runSync(Ref.set(savedActiveElement, null))
     }
-    Effect.runSync(Ref.set(savedActiveElement, null))
   }
 })
 
