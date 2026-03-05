@@ -1,8 +1,13 @@
-import { Data, Effect, Schema } from 'effect'
+import { Console, Data, Effect, Option, Ref, Schema } from 'effect'
 
 const SERVER_URL = 'http://localhost:3000'
 
+// ── Errors ────────────────────────────────────────────────────────────────────
+
 class ApiError extends Data.TaggedError('ApiError')<{ message: string }> {}
+class SelectionError extends Data.TaggedError('SelectionError')<{ message: string }> {}
+
+// ── API ───────────────────────────────────────────────────────────────────────
 
 const CorrectResponseSchema = Schema.Struct({ corrected: Schema.String })
 
@@ -34,44 +39,63 @@ const correctText = (text: string): Effect.Effect<string, ApiError> =>
     return corrected
   })
 
-// ── Selection ────────────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────
 
-let savedRange: Range | null = null
+const savedRange = Effect.runSync(Ref.make<Range | null>(null))
+const toastEl = Effect.runSync(Ref.make<HTMLElement | null>(null))
 
-function readAndSaveSelection(): string | null {
-  const selection = window.getSelection()
-  if (!selection || selection.rangeCount === 0) return null
-  savedRange = selection.getRangeAt(0).cloneRange()
-  return selection.toString() || null
-}
+// ── Selection ─────────────────────────────────────────────────────────────────
 
-function restoreAndReplace(text: string) {
-  const active = document.activeElement
+const readAndSaveSelection: Effect.Effect<string, SelectionError> = Effect.sync(() =>
+  window.getSelection(),
+).pipe(
+  Effect.flatMap(selection =>
+    Option.fromNullable(selection && selection.rangeCount > 0 ? selection : null).pipe(
+      Option.match({
+        onNone: () => Effect.fail(new SelectionError({ message: 'No selection' })),
+        onSome: sel => {
+          const text = sel.toString()
+          return text.trim()
+            ? Ref.set(savedRange, sel.getRangeAt(0).cloneRange()).pipe(
+                Effect.as(text),
+              )
+            : Effect.fail(new SelectionError({ message: 'Empty selection' }))
+        },
+      }),
+    ),
+  ),
+)
 
-  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
-    const start = active.selectionStart ?? 0
-    const end = active.selectionEnd ?? 0
-    active.setRangeText(text, start, end, 'end')
-    active.dispatchEvent(new Event('input', { bubbles: true }))
-    return
-  }
+const restoreAndReplace = (text: string): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const active = document.activeElement
 
-  if (!savedRange) return
-  const selection = window.getSelection()
-  if (selection) {
-    selection.removeAllRanges()
-    selection.addRange(savedRange)
-    document.execCommand('insertText', false, text)
-  }
-}
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+      const start = active.selectionStart ?? 0
+      const end = active.selectionEnd ?? 0
+      active.setRangeText(text, start, end, 'end')
+      active.dispatchEvent(new Event('input', { bubbles: true }))
+      return
+    }
+
+    const range = yield* Ref.get(savedRange)
+    if (!range) return
+
+    yield* Effect.sync(() => {
+      const selection = window.getSelection()
+      if (selection) {
+        selection.removeAllRanges()
+        selection.addRange(range)
+        document.execCommand('insertText', false, text)
+      }
+    })
+  })
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 
-let toastEl: HTMLElement | null = null
-
 type ToastVariant = 'loading' | 'success' | 'error'
 
-function injectStyles() {
+const injectStyles: Effect.Effect<void> = Effect.sync(() => {
   if (document.getElementById('correctr-styles')) return
   const style = document.createElement('style')
   style.id = 'correctr-styles'
@@ -83,72 +107,82 @@ function injectStyles() {
     @keyframes correctr-spin { to { transform: rotate(360deg); } }
   `
   document.head.appendChild(style)
-}
+})
 
-function showToast(message: string, variant: ToastVariant) {
-  injectStyles()
-  toastEl?.remove()
+const showToast = (message: string, variant: ToastVariant): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    yield* injectStyles
 
-  const palette = {
-    loading: { bg: '#f8f9fb', border: '#e4e7ec', color: '#374151' },
-    success: { bg: '#f0fdf4', border: '#bbf7d0', color: '#15803d' },
-    error: { bg: '#fef2f2', border: '#fecaca', color: '#dc2626' },
-  }
-  const icons = { loading: '↻', success: '✓', error: '✕' }
-  const p = palette[variant]
+    const prev = yield* Ref.get(toastEl)
+    prev?.remove()
 
-  toastEl = document.createElement('div')
-  toastEl.style.cssText = `
-    position: fixed; bottom: 20px; right: 20px; z-index: 2147483647;
-    display: flex; align-items: center; gap: 8px;
-    padding: 10px 16px; border-radius: 10px;
-    border: 1px solid ${p.border}; background: ${p.bg}; color: ${p.color};
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 13px; font-weight: 500;
-    box-shadow: 0 4px 12px rgba(0,0,0,.10);
-    animation: correctr-in 0.2s ease both;
-  `
+    const palette = {
+      loading: { bg: '#f8f9fb', border: '#e4e7ec', color: '#374151' },
+      success: { bg: '#f0fdf4', border: '#bbf7d0', color: '#15803d' },
+      error: { bg: '#fef2f2', border: '#fecaca', color: '#dc2626' },
+    }
+    const icons = { loading: '↻', success: '✓', error: '✕' }
+    const p = palette[variant]
 
-  const iconSpan = document.createElement('span')
-  iconSpan.textContent = icons[variant]
-  if (variant === 'loading') {
-    iconSpan.style.cssText = 'display:inline-block; animation: correctr-spin 0.7s linear infinite;'
-  }
+    const el = document.createElement('div')
+    el.style.cssText = `
+      position: fixed; bottom: 20px; right: 20px; z-index: 2147483647;
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 16px; border-radius: 10px;
+      border: 1px solid ${p.border}; background: ${p.bg}; color: ${p.color};
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px; font-weight: 500;
+      box-shadow: 0 4px 12px rgba(0,0,0,.10);
+      animation: correctr-in 0.2s ease both;
+    `
 
-  const label = document.createElement('span')
-  label.textContent = message
+    const iconSpan = document.createElement('span')
+    iconSpan.textContent = icons[variant]
+    if (variant === 'loading') {
+      iconSpan.style.cssText =
+        'display:inline-block; animation: correctr-spin 0.7s linear infinite;'
+    }
 
-  toastEl.appendChild(iconSpan)
-  toastEl.appendChild(label)
-  document.body.appendChild(toastEl)
+    const label = document.createElement('span')
+    label.textContent = message
 
-  if (variant !== 'loading') {
-    setTimeout(() => {
-      toastEl?.remove()
-      toastEl = null
-    }, 3000)
-  }
-}
+    el.appendChild(iconSpan)
+    el.appendChild(label)
+    document.body.appendChild(el)
+
+    yield* Ref.set(toastEl, el)
+
+    if (variant !== 'loading') {
+      setTimeout(() => {
+        el.remove()
+        Effect.runSync(Ref.set(toastEl, null))
+      }, 3000)
+    }
+  })
 
 // ── Message handler ───────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener(message => {
   if (message.type !== 'CORRECTR_TRIGGER') return
 
-  const text = readAndSaveSelection()
-  if (!text?.trim()) return
-
-  showToast('Correcting…', 'loading')
-
-  Effect.runPromise(correctText(text)).then(
-    corrected => {
-      restoreAndReplace(corrected)
-      showToast('Text corrected!', 'success')
-      savedRange = null
-    },
-    (err: ApiError) => {
-      showToast(err.message ?? 'Something went wrong', 'error')
-      savedRange = null
-    },
+  const program = Effect.gen(function* () {
+    const text = yield* readAndSaveSelection
+    yield* showToast('Correcting…', 'loading')
+    yield* Console.log(`[content] Correcting ${text.length} chars`)
+    const corrected = yield* correctText(text)
+    yield* restoreAndReplace(corrected)
+    yield* Ref.set(savedRange, null)
+    yield* showToast('Text corrected!', 'success')
+  }).pipe(
+    Effect.catchTags({
+      SelectionError: () => Effect.void,
+      ApiError: e =>
+        Console.error('[content] API error:', e.message).pipe(
+          Effect.andThen(showToast(e.message, 'error')),
+          Effect.andThen(Ref.set(savedRange, null)),
+        ),
+    }),
   )
+
+  Effect.runPromise(program)
 })
