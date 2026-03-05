@@ -49,15 +49,22 @@ const toastEl = Effect.runSync(Ref.make<HTMLElement | null>(null))
 
 console.log('[content] Content script loaded')
 
+const isInputLike = (el: Element | null): el is HTMLInputElement | HTMLTextAreaElement =>
+  el instanceof HTMLInputElement ||
+  el instanceof HTMLTextAreaElement ||
+  el?.tagName === 'INPUT' ||
+  el?.tagName === 'TEXTAREA'
+
 const saveCurrentSelection = (source: string) => {
   const active = document.activeElement
   console.log(`[content] saveCurrentSelection (${source}) — activeElement: ${active?.tagName} ${active?.constructor.name}`)
-  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
-    const start = active.selectionStart ?? 0
-    const end = active.selectionEnd ?? 0
+  if (isInputLike(active)) {
+    const el = active as HTMLInputElement
+    const start = el.selectionStart ?? 0
+    const end = el.selectionEnd ?? 0
     if (start !== end) {
       console.log(`[content] (${source}) saved input/textarea [${start}, ${end}]`)
-      Effect.runSync(Ref.set(savedActiveElement, { el: active, start, end }))
+      Effect.runSync(Ref.set(savedActiveElement, { el, start, end }))
       Effect.runSync(Ref.set(savedRange, null))
     }
   } else {
