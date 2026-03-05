@@ -3,7 +3,9 @@
   "private": true,
   "scripts": {
     "dev": "bun --watch src/index.ts",
-    "start": "bun src/index.ts"
+    "start": "bun src/index.ts",
+    "docker:build": "docker build -t correctr-server .",
+    "docker:run": "docker run --rm -p 3000:3000 --env-file .env correctr-server"
   },
   "dependencies": {
     "effect": "^3.12.0",
