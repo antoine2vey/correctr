@@ -145,10 +145,11 @@ const attachIframeListeners = (iframe: HTMLIFrameElement) => {
     }
   }
 
+  // Always listen for future loads — handles srcdoc being set after the iframe is created
+  iframe.addEventListener('load', attach)
+  // Also attach to current document if already loaded
   if (iframe.contentDocument?.readyState === 'complete') {
     attach()
-  } else {
-    iframe.addEventListener('load', attach)
   }
 }
 
