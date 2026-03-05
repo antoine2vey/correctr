@@ -109,6 +109,64 @@ document.addEventListener('mousedown', e => {
   if (e.button === 2) saveCurrentSelection('mousedown-right')
 })
 
+// ── Iframe selection tracking ──────────────────────────────────────────────────
+
+const attachIframeListeners = (iframe: HTMLIFrameElement) => {
+  const attach = () => {
+    try {
+      const iframeDoc = iframe.contentDocument
+      if (!iframeDoc) return
+      iframeDoc.addEventListener('selectionchange', () => {
+        const selection = iframe.contentWindow?.getSelection()
+        const text = selection?.toString() ?? ''
+        if (text.trim() && selection && selection.rangeCount > 0) {
+          Effect.runSync(Ref.set(savedIframe, iframe))
+          Effect.runSync(Ref.set(savedRange, selection.getRangeAt(0).cloneRange()))
+          Effect.runSync(Ref.set(savedActiveElement, null))
+          console.log(`[content] Saved range from iframe ${iframe.id}`)
+        }
+      })
+      iframeDoc.addEventListener('mousedown', e => {
+        const me = e as MouseEvent
+        if (me.button === 2) {
+          const selection = iframe.contentWindow?.getSelection()
+          const text = selection?.toString() ?? ''
+          if (text.trim() && selection && selection.rangeCount > 0) {
+            Effect.runSync(Ref.set(savedIframe, iframe))
+            Effect.runSync(Ref.set(savedRange, selection.getRangeAt(0).cloneRange()))
+            Effect.runSync(Ref.set(savedActiveElement, null))
+            console.log(`[content] Saved range from iframe ${iframe.id} (mousedown-right)`)
+          }
+        }
+      })
+      console.log(`[content] Attached listeners to iframe ${iframe.id}`)
+    } catch (e) {
+      console.warn(`[content] Cannot attach listener to iframe`, e)
+    }
+  }
+
+  if (iframe.contentDocument?.readyState === 'complete') {
+    attach()
+  } else {
+    iframe.addEventListener('load', attach)
+  }
+}
+
+document.querySelectorAll('iframe').forEach(iframe => attachIframeListeners(iframe as HTMLIFrameElement))
+
+const iframeObserver = new MutationObserver(mutations => {
+  for (const mutation of mutations) {
+    for (const node of mutation.addedNodes) {
+      if (node instanceof HTMLIFrameElement) {
+        attachIframeListeners(node)
+      } else if (node instanceof Element) {
+        node.querySelectorAll('iframe').forEach(iframe => attachIframeListeners(iframe as HTMLIFrameElement))
+      }
+    }
+  }
+})
+iframeObserver.observe(document.body, { childList: true, subtree: true })
+
 // ── Selection ─────────────────────────────────────────────────────────────────
 
 const validateText = (text: string): Effect.Effect<string, SelectionError> =>
