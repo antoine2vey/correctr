@@ -1,6 +1,6 @@
-import { Console, Data, Effect, Option, Ref, Schema } from 'effect'
+import { Console, Data, Effect, Ref, Schema } from 'effect'
 
-const SERVER_URL = 'http://localhost:3000'
+const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? 'http://localhost:3000'
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -42,44 +42,60 @@ const correctText = (text: string): Effect.Effect<string, ApiError> =>
 // ── State ─────────────────────────────────────────────────────────────────────
 
 const savedRange = Effect.runSync(Ref.make<Range | null>(null))
+const savedActiveElement = Effect.runSync(
+  Ref.make<{ el: HTMLInputElement | HTMLTextAreaElement; start: number; end: number } | null>(null),
+)
 const toastEl = Effect.runSync(Ref.make<HTMLElement | null>(null))
+
+console.log('[content] Content script loaded')
+
+// Save selection state before the browser clears it on context menu open
+document.addEventListener('contextmenu', () => {
+  const active = document.activeElement
+  console.log('[content] contextmenu event — activeElement:', active?.tagName, active?.constructor.name)
+  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+    const start = active.selectionStart ?? 0
+    const end = active.selectionEnd ?? 0
+    console.log(`[content] Saving input/textarea selection: [${start}, ${end}]`)
+    Effect.runSync(Ref.set(savedActiveElement, { el: active, start, end }))
+    Effect.runSync(Ref.set(savedRange, null))
+  } else {
+    const selection = window.getSelection()
+    const hasRange = !!(selection && selection.rangeCount > 0)
+    console.log(`[content] Saving range selection — hasRange: ${hasRange}, text: "${selection?.toString().slice(0, 50)}"`)
+    if (hasRange) {
+      Effect.runSync(Ref.set(savedRange, selection!.getRangeAt(0).cloneRange()))
+    }
+    Effect.runSync(Ref.set(savedActiveElement, null))
+  }
+})
 
 // ── Selection ─────────────────────────────────────────────────────────────────
 
-const readAndSaveSelection: Effect.Effect<string, SelectionError> = Effect.sync(() =>
-  window.getSelection(),
-).pipe(
-  Effect.flatMap(selection =>
-    Option.fromNullable(selection && selection.rangeCount > 0 ? selection : null).pipe(
-      Option.match({
-        onNone: () => Effect.fail(new SelectionError({ message: 'No selection' })),
-        onSome: sel => {
-          const text = sel.toString()
-          return text.trim()
-            ? Ref.set(savedRange, sel.getRangeAt(0).cloneRange()).pipe(
-                Effect.as(text),
-              )
-            : Effect.fail(new SelectionError({ message: 'Empty selection' }))
-        },
-      }),
-    ),
-  ),
-)
+const validateText = (text: string): Effect.Effect<string, SelectionError> =>
+  text.trim()
+    ? Effect.succeed(text)
+    : Effect.fail(new SelectionError({ message: 'Empty selection' }))
 
 const restoreAndReplace = (text: string): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const active = document.activeElement
+    const saved = yield* Ref.get(savedActiveElement)
 
-    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
-      const start = active.selectionStart ?? 0
-      const end = active.selectionEnd ?? 0
-      active.setRangeText(text, start, end, 'end')
-      active.dispatchEvent(new Event('input', { bubbles: true }))
+    if (saved) {
+      console.log(`[content] Replacing via input/textarea setRangeText [${saved.start}, ${saved.end}]`)
+      saved.el.focus()
+      saved.el.setRangeText(text, saved.start, saved.end, 'end')
+      saved.el.dispatchEvent(new Event('input', { bubbles: true }))
+      console.log('[content] Replacement done (input/textarea)')
       return
     }
 
     const range = yield* Ref.get(savedRange)
-    if (!range) return
+    console.log(`[content] Replacing via execCommand — range: ${range ? 'present' : 'null'}`)
+    if (!range) {
+      console.warn('[content] No saved range, cannot replace text')
+      return
+    }
 
     yield* Effect.sync(() => {
       const selection = window.getSelection()
@@ -87,6 +103,9 @@ const restoreAndReplace = (text: string): Effect.Effect<void> =>
         selection.removeAllRanges()
         selection.addRange(range)
         document.execCommand('insertText', false, text)
+        console.log('[content] Replacement done (execCommand)')
+      } else {
+        console.warn('[content] getSelection() returned null, cannot replace')
       }
     })
   })
@@ -165,17 +184,21 @@ const showToast = (message: string, variant: ToastVariant): Effect.Effect<void> 
 chrome.runtime.onMessage.addListener(message => {
   if (message.type !== 'CORRECTR_TRIGGER') return
 
+  console.log('[content] Received CORRECTR_TRIGGER, text length:', message.text?.length ?? 0)
+
   const program = Effect.gen(function* () {
-    const text = yield* readAndSaveSelection
+    const text = yield* validateText(message.text ?? '')
+    console.log(`[content] Text validated (${text.length} chars): "${text.slice(0, 80)}${text.length > 80 ? '…' : ''}"`)
     yield* showToast('Correcting…', 'loading')
-    yield* Console.log(`[content] Correcting ${text.length} chars`)
     const corrected = yield* correctText(text)
+    console.log(`[content] Received corrected text (${corrected.length} chars): "${corrected.slice(0, 80)}${corrected.length > 80 ? '…' : ''}"`)
     yield* restoreAndReplace(corrected)
     yield* Ref.set(savedRange, null)
+    yield* Ref.set(savedActiveElement, null)
     yield* showToast('Text corrected!', 'success')
   }).pipe(
     Effect.catchTags({
-      SelectionError: () => Effect.void,
+      SelectionError: e => Effect.sync(() => console.warn('[content] SelectionError:', e.message)),
       ApiError: e =>
         Console.error('[content] API error:', e.message).pipe(
           Effect.andThen(showToast(e.message, 'error')),

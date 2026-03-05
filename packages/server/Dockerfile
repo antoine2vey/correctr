@@ -3,8 +3,8 @@ WORKDIR /app
 
 # Install dependencies
 FROM base AS deps
-COPY package.json bun.lock* ./
-RUN bun install --frozen-lockfile --production
+COPY package.json ./
+RUN bun install --production
 
 # Runtime
 FROM base
