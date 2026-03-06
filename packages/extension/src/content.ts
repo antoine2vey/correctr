@@ -1,6 +1,5 @@
 import { Data, Effect, Ref, Schema } from 'effect'
 
-// @ts-expect-error - VITE_SERVER_URL is not defined in the environment
 const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? 'http://localhost:3000'
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -49,25 +48,36 @@ const savedActiveElement = Effect.runSync(
 const savedIframe = Effect.runSync(Ref.make<HTMLIFrameElement | null>(null))
 const toastEl = Effect.runSync(Ref.make<HTMLElement | null>(null))
 
+const clearSavedState = Ref.set(savedRange, null).pipe(
+  Effect.andThen(Ref.set(savedActiveElement, null)),
+  Effect.andThen(Ref.set(savedIframe, null)),
+)
+
 const isInputLike = (el: Element | null): el is HTMLInputElement | HTMLTextAreaElement =>
   el instanceof HTMLInputElement ||
   el instanceof HTMLTextAreaElement ||
   el?.tagName === 'INPUT' ||
   el?.tagName === 'TEXTAREA'
 
+const saveIframeSelection = (iframe: HTMLIFrameElement) => {
+  const selection = iframe.contentWindow?.getSelection()
+  const text = selection?.toString() ?? ''
+  if (text.trim() && selection && selection.rangeCount > 0) {
+    Effect.runSync(
+      Ref.set(savedIframe, iframe).pipe(
+        Effect.andThen(Ref.set(savedRange, selection.getRangeAt(0).cloneRange())),
+        Effect.andThen(Ref.set(savedActiveElement, null)),
+      ),
+    )
+  }
+}
+
 const saveCurrentSelection = () => {
   const active = document.activeElement
 
   if (active instanceof HTMLIFrameElement) {
     try {
-      const iframeWin = active.contentWindow
-      const selection = iframeWin?.getSelection()
-      const text = selection?.toString() ?? ''
-      if (text.trim() && selection && selection.rangeCount > 0) {
-        Effect.runSync(Ref.set(savedIframe, active))
-        Effect.runSync(Ref.set(savedRange, selection.getRangeAt(0).cloneRange()))
-        Effect.runSync(Ref.set(savedActiveElement, null))
-      }
+      saveIframeSelection(active)
     } catch {
       // cross-origin iframe, skip
     }
@@ -79,17 +89,23 @@ const saveCurrentSelection = () => {
     const start = el.selectionStart ?? 0
     const end = el.selectionEnd ?? 0
     if (start !== end) {
-      Effect.runSync(Ref.set(savedActiveElement, { el, start, end }))
-      Effect.runSync(Ref.set(savedRange, null))
-      Effect.runSync(Ref.set(savedIframe, null))
+      Effect.runSync(
+        Ref.set(savedActiveElement, { el, start, end }).pipe(
+          Effect.andThen(Ref.set(savedRange, null)),
+          Effect.andThen(Ref.set(savedIframe, null)),
+        ),
+      )
     }
   } else {
     const selection = window.getSelection()
     const text = selection?.toString() ?? ''
     if (text.trim() && selection && selection.rangeCount > 0) {
-      Effect.runSync(Ref.set(savedRange, selection.getRangeAt(0).cloneRange()))
-      Effect.runSync(Ref.set(savedActiveElement, null))
-      Effect.runSync(Ref.set(savedIframe, null))
+      Effect.runSync(
+        Ref.set(savedRange, selection.getRangeAt(0).cloneRange()).pipe(
+          Effect.andThen(Ref.set(savedActiveElement, null)),
+          Effect.andThen(Ref.set(savedIframe, null)),
+        ),
+      )
     }
   }
 }
@@ -106,19 +122,6 @@ document.addEventListener('mousedown', e => {
 
 const instrumentedIframes = new WeakSet<HTMLIFrameElement>()
 
-const saveIframeSelection = (iframe: HTMLIFrameElement) => {
-  const selection = iframe.contentWindow?.getSelection()
-  const text = selection?.toString() ?? ''
-  if (text.trim() && selection && selection.rangeCount > 0) {
-    Effect.runSync(
-      Ref.set(savedIframe, iframe).pipe(
-        Effect.andThen(Ref.set(savedRange, selection.getRangeAt(0).cloneRange())),
-        Effect.andThen(Ref.set(savedActiveElement, null)),
-      ),
-    )
-  }
-}
-
 const attachIframeListeners = (iframe: HTMLIFrameElement) => {
   if (instrumentedIframes.has(iframe)) return
   instrumentedIframes.add(iframe)
@@ -128,9 +131,6 @@ const attachIframeListeners = (iframe: HTMLIFrameElement) => {
       const iframeDoc = iframe.contentDocument
       if (!iframeDoc) return
       iframeDoc.addEventListener('selectionchange', () => saveIframeSelection(iframe))
-      iframeDoc.addEventListener('mousedown', (e: MouseEvent) => {
-        if (e.button === 2) saveIframeSelection(iframe)
-      })
     } catch {
       // cross-origin or unavailable iframe, skip
     }
@@ -148,7 +148,7 @@ document.querySelectorAll('iframe').forEach(attachIframeListeners)
 
 const iframeObserver = new MutationObserver(mutations => {
   for (const mutation of mutations) {
-    for (const node of Array.from(mutation.addedNodes)) {
+    for (const node of mutation.addedNodes) {
       if (node instanceof HTMLIFrameElement) {
         attachIframeListeners(node)
       } else if (node instanceof Element) {
@@ -290,14 +290,12 @@ chrome.runtime.onMessage.addListener(message => {
     yield* showToast('Correcting…', 'loading')
     const corrected = yield* correctText(text)
     yield* restoreAndReplace(corrected)
-    yield* Ref.set(savedRange, null)
-    yield* Ref.set(savedActiveElement, null)
-    yield* Ref.set(savedIframe, null)
+    yield* clearSavedState
     yield* showToast('Text corrected!', 'success')
   }).pipe(
     Effect.catchTags({
       SelectionError: () => Effect.void,
-      ApiError: e => showToast(e.message, 'error').pipe(Effect.andThen(Ref.set(savedRange, null))),
+      ApiError: e => showToast(e.message, 'error').pipe(Effect.andThen(clearSavedState)),
     }),
   )
 
