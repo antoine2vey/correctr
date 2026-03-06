@@ -111,33 +111,33 @@ document.addEventListener('mousedown', e => {
 
 // ── Iframe selection tracking ──────────────────────────────────────────────────
 
+const instrumentedIframes = new WeakSet<HTMLIFrameElement>()
+
+const saveIframeSelection = (iframe: HTMLIFrameElement, label: string) => {
+  const selection = iframe.contentWindow?.getSelection()
+  const text = selection?.toString() ?? ''
+  if (text.trim() && selection && selection.rangeCount > 0) {
+    Effect.runSync(
+      Ref.set(savedIframe, iframe).pipe(
+        Effect.andThen(Ref.set(savedRange, selection.getRangeAt(0).cloneRange())),
+        Effect.andThen(Ref.set(savedActiveElement, null)),
+      ),
+    )
+    console.log(`[content] Saved range from iframe ${iframe.id}${label}`)
+  }
+}
+
 const attachIframeListeners = (iframe: HTMLIFrameElement) => {
+  if (instrumentedIframes.has(iframe)) return
+  instrumentedIframes.add(iframe)
+
   const attach = () => {
     try {
       const iframeDoc = iframe.contentDocument
       if (!iframeDoc) return
-      iframeDoc.addEventListener('selectionchange', () => {
-        const selection = iframe.contentWindow?.getSelection()
-        const text = selection?.toString() ?? ''
-        if (text.trim() && selection && selection.rangeCount > 0) {
-          Effect.runSync(Ref.set(savedIframe, iframe))
-          Effect.runSync(Ref.set(savedRange, selection.getRangeAt(0).cloneRange()))
-          Effect.runSync(Ref.set(savedActiveElement, null))
-          console.log(`[content] Saved range from iframe ${iframe.id}`)
-        }
-      })
-      iframeDoc.addEventListener('mousedown', e => {
-        const me = e as MouseEvent
-        if (me.button === 2) {
-          const selection = iframe.contentWindow?.getSelection()
-          const text = selection?.toString() ?? ''
-          if (text.trim() && selection && selection.rangeCount > 0) {
-            Effect.runSync(Ref.set(savedIframe, iframe))
-            Effect.runSync(Ref.set(savedRange, selection.getRangeAt(0).cloneRange()))
-            Effect.runSync(Ref.set(savedActiveElement, null))
-            console.log(`[content] Saved range from iframe ${iframe.id} (mousedown-right)`)
-          }
-        }
+      iframeDoc.addEventListener('selectionchange', () => saveIframeSelection(iframe, ''))
+      iframeDoc.addEventListener('mousedown', (e: MouseEvent) => {
+        if (e.button === 2) saveIframeSelection(iframe, ' (mousedown-right)')
       })
       console.log(`[content] Attached listeners to iframe ${iframe.id}`)
     } catch (e) {
@@ -153,7 +153,7 @@ const attachIframeListeners = (iframe: HTMLIFrameElement) => {
   }
 }
 
-document.querySelectorAll('iframe').forEach(iframe => attachIframeListeners(iframe as HTMLIFrameElement))
+document.querySelectorAll('iframe').forEach(attachIframeListeners)
 
 const iframeObserver = new MutationObserver(mutations => {
   for (const mutation of mutations) {
@@ -161,7 +161,7 @@ const iframeObserver = new MutationObserver(mutations => {
       if (node instanceof HTMLIFrameElement) {
         attachIframeListeners(node)
       } else if (node instanceof Element) {
-        node.querySelectorAll('iframe').forEach(iframe => attachIframeListeners(iframe as HTMLIFrameElement))
+        node.querySelectorAll('iframe').forEach(attachIframeListeners)
       }
     }
   }
