@@ -148,7 +148,7 @@ document.querySelectorAll('iframe').forEach(attachIframeListeners)
 
 const iframeObserver = new MutationObserver(mutations => {
   for (const mutation of mutations) {
-    for (const node of mutation.addedNodes) {
+    for (const node of Array.from(mutation.addedNodes)) {
       if (node instanceof HTMLIFrameElement) {
         attachIframeListeners(node)
       } else if (node instanceof Element) {
