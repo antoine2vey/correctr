@@ -1,5 +1,6 @@
-import { Console, Data, Effect, Ref, Schema } from 'effect'
+import { Data, Effect, Ref, Schema } from 'effect'
 
+// @ts-expect-error - VITE_SERVER_URL is not defined in the environment
 const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? 'http://localhost:3000'
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -48,32 +49,27 @@ const savedActiveElement = Effect.runSync(
 const savedIframe = Effect.runSync(Ref.make<HTMLIFrameElement | null>(null))
 const toastEl = Effect.runSync(Ref.make<HTMLElement | null>(null))
 
-console.log('[content] Content script loaded')
-
 const isInputLike = (el: Element | null): el is HTMLInputElement | HTMLTextAreaElement =>
   el instanceof HTMLInputElement ||
   el instanceof HTMLTextAreaElement ||
   el?.tagName === 'INPUT' ||
   el?.tagName === 'TEXTAREA'
 
-const saveCurrentSelection = (source: string) => {
+const saveCurrentSelection = () => {
   const active = document.activeElement
-  console.log(`[content] saveCurrentSelection (${source}) — activeElement: ${active?.tagName} ${active?.constructor.name}`)
 
   if (active instanceof HTMLIFrameElement) {
     try {
       const iframeWin = active.contentWindow
       const selection = iframeWin?.getSelection()
       const text = selection?.toString() ?? ''
-      console.log(`[content] (${source}) iframe selection rangeCount=${selection?.rangeCount} text="${text.slice(0, 50)}"`)
       if (text.trim() && selection && selection.rangeCount > 0) {
         Effect.runSync(Ref.set(savedIframe, active))
         Effect.runSync(Ref.set(savedRange, selection.getRangeAt(0).cloneRange()))
         Effect.runSync(Ref.set(savedActiveElement, null))
-        console.log(`[content] (${source}) saved iframe range`)
       }
-    } catch (e) {
-      console.warn(`[content] (${source}) cross-origin iframe, cannot access selection`, e)
+    } catch {
+      // cross-origin iframe, skip
     }
     return
   }
@@ -83,7 +79,6 @@ const saveCurrentSelection = (source: string) => {
     const start = el.selectionStart ?? 0
     const end = el.selectionEnd ?? 0
     if (start !== end) {
-      console.log(`[content] (${source}) saved input/textarea [${start}, ${end}]`)
       Effect.runSync(Ref.set(savedActiveElement, { el, start, end }))
       Effect.runSync(Ref.set(savedRange, null))
       Effect.runSync(Ref.set(savedIframe, null))
@@ -91,29 +86,27 @@ const saveCurrentSelection = (source: string) => {
   } else {
     const selection = window.getSelection()
     const text = selection?.toString() ?? ''
-    console.log(`[content] (${source}) getSelection rangeCount=${selection?.rangeCount} text="${text.slice(0, 50)}"`)
     if (text.trim() && selection && selection.rangeCount > 0) {
       Effect.runSync(Ref.set(savedRange, selection.getRangeAt(0).cloneRange()))
       Effect.runSync(Ref.set(savedActiveElement, null))
       Effect.runSync(Ref.set(savedIframe, null))
-      console.log(`[content] (${source}) saved range`)
     }
   }
 }
 
 // Track selection continuously
-document.addEventListener('selectionchange', () => saveCurrentSelection('selectionchange'))
+document.addEventListener('selectionchange', saveCurrentSelection)
 
 // Also capture on right-click mousedown — fires before contextmenu and before any selection clearing
 document.addEventListener('mousedown', e => {
-  if (e.button === 2) saveCurrentSelection('mousedown-right')
+  if (e.button === 2) saveCurrentSelection()
 })
 
 // ── Iframe selection tracking ──────────────────────────────────────────────────
 
 const instrumentedIframes = new WeakSet<HTMLIFrameElement>()
 
-const saveIframeSelection = (iframe: HTMLIFrameElement, label: string) => {
+const saveIframeSelection = (iframe: HTMLIFrameElement) => {
   const selection = iframe.contentWindow?.getSelection()
   const text = selection?.toString() ?? ''
   if (text.trim() && selection && selection.rangeCount > 0) {
@@ -123,7 +116,6 @@ const saveIframeSelection = (iframe: HTMLIFrameElement, label: string) => {
         Effect.andThen(Ref.set(savedActiveElement, null)),
       ),
     )
-    console.log(`[content] Saved range from iframe ${iframe.id}${label}`)
   }
 }
 
@@ -135,13 +127,12 @@ const attachIframeListeners = (iframe: HTMLIFrameElement) => {
     try {
       const iframeDoc = iframe.contentDocument
       if (!iframeDoc) return
-      iframeDoc.addEventListener('selectionchange', () => saveIframeSelection(iframe, ''))
+      iframeDoc.addEventListener('selectionchange', () => saveIframeSelection(iframe))
       iframeDoc.addEventListener('mousedown', (e: MouseEvent) => {
-        if (e.button === 2) saveIframeSelection(iframe, ' (mousedown-right)')
+        if (e.button === 2) saveIframeSelection(iframe)
       })
-      console.log(`[content] Attached listeners to iframe ${iframe.id}`)
-    } catch (e) {
-      console.warn(`[content] Cannot attach listener to iframe`, e)
+    } catch {
+      // cross-origin or unavailable iframe, skip
     }
   }
 
@@ -157,7 +148,7 @@ document.querySelectorAll('iframe').forEach(attachIframeListeners)
 
 const iframeObserver = new MutationObserver(mutations => {
   for (const mutation of mutations) {
-    for (const node of mutation.addedNodes) {
+    for (const node of Array.from(mutation.addedNodes)) {
       if (node instanceof HTMLIFrameElement) {
         attachIframeListeners(node)
       } else if (node instanceof Element) {
@@ -179,20 +170,16 @@ const restoreAndReplace = (text: string): Effect.Effect<void> =>
   Effect.gen(function* () {
     const saved = yield* Ref.get(savedActiveElement)
     if (saved) {
-      console.log(`[content] Replacing via input/textarea setRangeText [${saved.start}, ${saved.end}]`)
       saved.el.focus()
       saved.el.setRangeText(text, saved.start, saved.end, 'end')
       saved.el.dispatchEvent(new Event('input', { bubbles: true }))
-      console.log('[content] Replacement done (input/textarea)')
       return
     }
 
     const iframe = yield* Ref.get(savedIframe)
     const range = yield* Ref.get(savedRange)
-    console.log(`[content] iframe: ${iframe ? iframe.id : 'null'}, range: ${range ? 'present' : 'null'}`)
 
     if (iframe && range) {
-      console.log('[content] Replacing via iframe execCommand')
       yield* Effect.sync(() => {
         try {
           const iframeWin = iframe.contentWindow
@@ -203,22 +190,16 @@ const restoreAndReplace = (text: string): Effect.Effect<void> =>
               selection.removeAllRanges()
               selection.addRange(range)
               iframeDoc.execCommand('insertText', false, text)
-              console.log('[content] Replacement done (iframe execCommand)')
-            } else {
-              console.warn('[content] iframe getSelection() returned null')
             }
           }
-        } catch (e) {
-          console.warn('[content] iframe replacement failed', e)
+        } catch {
+          // replacement failed, skip
         }
       })
       return
     }
 
-    if (!range) {
-      console.warn('[content] No saved range, cannot replace text')
-      return
-    }
+    if (!range) return
 
     yield* Effect.sync(() => {
       const selection = window.getSelection()
@@ -226,9 +207,6 @@ const restoreAndReplace = (text: string): Effect.Effect<void> =>
         selection.removeAllRanges()
         selection.addRange(range)
         document.execCommand('insertText', false, text)
-        console.log('[content] Replacement done (execCommand)')
-      } else {
-        console.warn('[content] getSelection() returned null, cannot replace')
       }
     })
   })
@@ -307,14 +285,10 @@ const showToast = (message: string, variant: ToastVariant): Effect.Effect<void> 
 chrome.runtime.onMessage.addListener(message => {
   if (message.type !== 'CORRECTR_TRIGGER') return
 
-  console.log('[content] Received CORRECTR_TRIGGER, text length:', message.text?.length ?? 0)
-
   const program = Effect.gen(function* () {
     const text = yield* validateText(message.text ?? '')
-    console.log(`[content] Text validated (${text.length} chars): "${text.slice(0, 80)}${text.length > 80 ? '…' : ''}"`)
     yield* showToast('Correcting…', 'loading')
     const corrected = yield* correctText(text)
-    console.log(`[content] Received corrected text (${corrected.length} chars): "${corrected.slice(0, 80)}${corrected.length > 80 ? '…' : ''}"`)
     yield* restoreAndReplace(corrected)
     yield* Ref.set(savedRange, null)
     yield* Ref.set(savedActiveElement, null)
@@ -322,12 +296,8 @@ chrome.runtime.onMessage.addListener(message => {
     yield* showToast('Text corrected!', 'success')
   }).pipe(
     Effect.catchTags({
-      SelectionError: e => Effect.sync(() => console.warn('[content] SelectionError:', e.message)),
-      ApiError: e =>
-        Console.error('[content] API error:', e.message).pipe(
-          Effect.andThen(showToast(e.message, 'error')),
-          Effect.andThen(Ref.set(savedRange, null)),
-        ),
+      SelectionError: () => Effect.void,
+      ApiError: e => showToast(e.message, 'error').pipe(Effect.andThen(Ref.set(savedRange, null))),
     }),
   )
 
